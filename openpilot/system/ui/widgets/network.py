@@ -110,11 +110,19 @@ class AdvancedNetworkSettings(Widget):
 
     # Tethering
     self._tethering_action = ToggleAction(initial_state=False)
-    tethering_btn = ListItem(lambda: tr("Enable Tethering"), action_item=self._tethering_action, callback=self._toggle_tethering)
+    tethering_btn = ListItem(lambda: tr("Enable Tethering"),
+                             description=lambda: tr("Keep the hotspot on, including after reboot"),
+                             action_item=self._tethering_action, callback=self._toggle_tethering)
 
     # Edit tethering password
     self._tethering_password_action = ButtonAction(lambda: tr("EDIT"))
     tethering_password_btn = ListItem(lambda: tr("Tethering Password"), action_item=self._tethering_password_action, callback=self._edit_tethering_password)
+
+    # Share hotspot internet
+    self._tethering_share_action = ToggleAction(initial_state=self._params.get_bool("TetheringShareInternet"))
+    tethering_share_btn = ListItem(lambda: tr("Hotspot Internet Sharing"),
+                                   description=lambda: tr("Share the device connection with hotspot clients"),
+                                   action_item=self._tethering_share_action, callback=self._toggle_tethering_share)
 
     # Roaming toggle
     roaming_enabled = self._params.get_bool("GsmRoaming")
@@ -140,6 +148,7 @@ class AdvancedNetworkSettings(Widget):
     items: list[Widget] = [
       tethering_btn,
       tethering_password_btn,
+      tethering_share_btn,
       text_item(lambda: tr("IP Address"), lambda: self._wifi_manager.ipv4_address),
       self._roaming_btn,
       self._apn_btn,
@@ -168,7 +177,13 @@ class AdvancedNetworkSettings(Widget):
     self._tethering_action.set_enabled(False)
     if checked:
       self._wifi_metered_action.set_enabled(False)
+    # set_tethering_active owns the TetheringEnabled write
     self._wifi_manager.set_tethering_active(checked)
+
+  def _toggle_tethering_share(self):
+    share = self._tethering_share_action.get_state()
+    self._params.put_bool("TetheringShareInternet", share, block=True)
+    self._wifi_manager.set_ipv4_forward(share)
 
   def _toggle_roaming(self):
     self._params.put_bool("GsmRoaming", self._roaming_action.get_state(), block=True)
@@ -248,9 +263,10 @@ class AdvancedNetworkSettings(Widget):
   def _update_state(self):
     self._wifi_manager.process_callbacks()
 
-    # If not using prime SIM, show GSM settings and enable IPv4 forwarding
+    # GSM rows only when not on full Prime; share internet follows the card alone.
     show_cell_settings = self._prime_state.get_type() in self._cell_prime_types
-    self._wifi_manager.set_ipv4_forward(show_cell_settings)
+    share = self._params.get_bool("TetheringShareInternet")
+    self._wifi_manager.set_ipv4_forward(share)
     self._roaming_btn.set_visible(show_cell_settings)
     self._apn_btn.set_visible(show_cell_settings)
     self._cellular_metered_btn.set_visible(show_cell_settings)
