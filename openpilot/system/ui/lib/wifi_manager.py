@@ -1,4 +1,5 @@
 import atexit
+import os
 import threading
 import time
 import uuid
@@ -36,8 +37,19 @@ else:
 
 TETHERING_IP_ADDRESS = "192.168.43.1"
 DEFAULT_TETHERING_PASSWORD = "swagswagcomma"
+TETHERING_IFACE_CONCURRENT = "p2p0"
+TETHERING_IFACE_FALLBACK = "wlan0"
+TETHERING_DEFAULT_CHANNEL = 6
 SIGNAL_QUEUE_SIZE = 10
 SCAN_PERIOD_SECONDS = 5
+
+
+def _freq_mhz_to_channel(freq: int) -> int | None:
+  if 2412 <= freq <= 2472:
+    return (freq - 2412) // 5 + 1
+  if freq == 2484:
+    return 14
+  return None
 
 DEBUG = False
 _dbus_call_idx = 0
@@ -183,13 +195,15 @@ class WifiManager:
     self._current_network_metered: MeteredType = MeteredType.UNKNOWN
     self._tethering_password: str = ""
     self._ipv4_forward = False
+    self._tethering_iface = TETHERING_IFACE_FALLBACK
+    self._params = Params() if Params is not None else None
 
     self._last_network_scan: float = 0.0
     self._callback_queue: list[Callable] = []
 
     self._tethering_ssid = "weedle"
-    if Params is not None:
-      dongle_id = Params().get("DongleId")
+    if self._params is not None:
+      dongle_id = self._params.get("DongleId")
       if dongle_id:
         self._tethering_ssid += "-" + dongle_id[:4]
 
@@ -214,13 +228,19 @@ class WifiManager:
       self._scan_thread.start()
       self._state_thread.start()
 
+      self._tethering_iface = self._resolve_tethering_iface()
+
       self._init_connections()
-      if Params is not None and self._tethering_ssid not in self._connections:
-        self._add_tethering_connection()
+      if self._params is not None:
+        if self._tethering_ssid not in self._connections:
+          self._add_tethering_connection()
+        self._ensure_tethering_profile()
 
       self._init_wifi_state()
 
       self._tethering_password = self._get_tethering_password()
+      if self._params is not None and self._params.get_bool("TetheringEnabled"):
+        self.set_tethering_active(True)
       cloudlog.debug("WifiManager initialized")
 
     threading.Thread(target=worker, daemon=True).start()
@@ -481,6 +501,13 @@ class WifiManager:
       self._enqueue_callbacks(self._activated)
       self._update_active_connection_info()
 
+      # Keep AP on same 2.4 channel as STA when concurrent Hotspot is up.
+      if self._params is not None and self._params.get_bool("TetheringEnabled") and self.is_tethering_active():
+        try:
+          self._ensure_tethering_profile()
+        except Exception:
+          cloudlog.exception("Failed to sync Hotspot channel to STA")
+
       # Persist volatile connections (created by AddAndActivateConnection2) to disk
       if conn_path is not None:
         conn_addr = DBusAddress(conn_path, bus_name=NM, interface=NM_CONNECTION_IFACE)
@@ -513,19 +540,43 @@ class WifiManager:
       time.sleep(1)
 
   def _get_adapter(self, adapter_type: int) -> str | None:
-    # Return the first NetworkManager device path matching adapter_type
+    # Prefer wlan0 for STA; p2p0 is reserved for concurrent Hotspot on AGNOS.
     try:
       reply = self._router_main.send_and_get_reply(new_method_call(self._nm, 'GetDevices'))
       if reply.header.message_type == MessageType.error:
         # NetworkManager is not available, body holds an error string instead of device paths
         return None
+      fallback: str | None = None
       for device_path in reply.body[0]:
         dev_addr = DBusAddress(device_path, bus_name=NM, interface=NM_DEVICE_IFACE)
-        dev_type = self._router_main.send_and_get_reply(Properties(dev_addr).get('DeviceType')).body[0][1]
-        if dev_type == adapter_type:
+        props = self._router_main.send_and_get_reply(Properties(dev_addr).get_all())
+        if props.header.message_type == MessageType.error:
+          continue
+        body = props.body[0]
+        if int(body.get('DeviceType', ('u', -1))[1]) != adapter_type:
+          continue
+        iface = str(body.get('Interface', ('s', ''))[1])
+        if iface == TETHERING_IFACE_FALLBACK or iface == 'wlan0':
           return str(device_path)
+        if fallback is None:
+          fallback = str(device_path)
+      return fallback
     except Exception as e:
       cloudlog.exception(f"Error getting adapter type {adapter_type}: {e}")
+    return None
+
+  def _get_device_by_iface(self, iface: str) -> str | None:
+    try:
+      reply = self._router_main.send_and_get_reply(new_method_call(self._nm, 'GetDevices'))
+      if reply.header.message_type == MessageType.error:
+        return None
+      for device_path in reply.body[0]:
+        dev_addr = DBusAddress(device_path, bus_name=NM, interface=NM_DEVICE_IFACE)
+        name = self._router_main.send_and_get_reply(Properties(dev_addr).get('Interface')).body[0][1]
+        if name == iface:
+          return str(device_path)
+    except Exception as e:
+      cloudlog.exception(f"Error getting device for iface {iface}: {e}")
     return None
 
   def _init_connections(self) -> None:
@@ -581,6 +632,11 @@ class WifiManager:
 
       conn_path = props.get('Connection', ('o', '/'))[1]
       if props.get('Type', ('s', ''))[1] == '802-11-wireless' and conn_path != '/':
+        # Skip Hotspot so STA state / frequency tracking stays on infrastructure.
+        if props.get('Id', ('s', ''))[1] == 'Hotspot':
+          continue
+        if conn_path == self._connections.get(self._tethering_ssid):
+          continue
         return conn_path, props
 
     return None, None
@@ -594,17 +650,19 @@ class WifiManager:
     return dict(reply.body[0])
 
   def _add_tethering_connection(self):
+    autoconnect = bool(self._params.get_bool("TetheringEnabled")) if self._params is not None else False
     connection = {
       'connection': {
         'type': ('s', '802-11-wireless'),
         'uuid': ('s', str(uuid.uuid4())),
         'id': ('s', 'Hotspot'),
         'autoconnect-retries': ('i', 0),
-        'interface-name': ('s', 'wlan0'),
-        'autoconnect': ('b', False),
+        'interface-name': ('s', self._tethering_iface),
+        'autoconnect': ('b', autoconnect),
       },
       '802-11-wireless': {
         'band': ('s', 'bg'),
+        'channel': ('u', TETHERING_DEFAULT_CHANNEL),
         'mode': ('s', 'ap'),
         'ssid': ('ay', self._tethering_ssid.encode("utf-8")),
       },
@@ -629,6 +687,118 @@ class WifiManager:
 
     settings_addr = DBusAddress(NM_SETTINGS_PATH, bus_name=NM, interface=NM_SETTINGS_IFACE)
     self._router_main.send_and_get_reply(new_method_call(settings_addr, 'AddConnection', 'a{sa{sv}}', (connection,)))
+    self._init_connections()
+
+  def _ensure_tethering_profile(self):
+    # Migrate existing Hotspot to concurrent iface / always-on without resetting PSK.
+    conn_path = self._connections.get(self._tethering_ssid)
+    if conn_path is None:
+      return
+
+    settings = self._get_connection_settings(conn_path)
+    if len(settings) == 0:
+      return
+
+    autoconnect = bool(self._params.get_bool("TetheringEnabled")) if self._params is not None else False
+    channel = self._hotspot_channel_for_sta()
+    wireless = settings.setdefault('802-11-wireless', {})
+    ipv4 = settings.setdefault('ipv4', {})
+
+    # Avoid NM Update while AP is up unless something actually changed (Update can bounce the AP).
+    if (settings['connection'].get('interface-name', ('s', ''))[1] == self._tethering_iface and
+        bool(settings['connection'].get('autoconnect', ('b', False))[1]) == autoconnect and
+        wireless.get('band', ('s', ''))[1] == 'bg' and
+        wireless.get('mode', ('s', ''))[1] == 'ap' and
+        wireless.get('channel', ('u', None))[1] == channel and
+        ipv4.get('method', ('s', ''))[1] == 'shared' and
+        bool(ipv4.get('never-default', ('b', False))[1])):
+      return
+
+    settings['connection']['interface-name'] = ('s', self._tethering_iface)
+    settings['connection']['autoconnect'] = ('b', autoconnect)
+    settings['connection']['id'] = ('s', 'Hotspot')
+    wireless['band'] = ('s', 'bg')
+    wireless['mode'] = ('s', 'ap')
+    wireless['channel'] = ('u', channel)
+    wireless['ssid'] = ('ay', self._tethering_ssid.encode("utf-8"))
+    ipv4['method'] = ('s', 'shared')
+    ipv4['never-default'] = ('b', True)
+
+    conn_addr = DBusAddress(conn_path, bus_name=NM, interface=NM_CONNECTION_IFACE)
+    reply = self._router_main.send_and_get_reply(new_method_call(conn_addr, 'Update', 'a{sa{sv}}', (settings,)))
+    if reply.header.message_type == MessageType.error:
+      cloudlog.warning(f"Failed to migrate Hotspot profile: {reply}")
+
+  def _hotspot_channel_for_sta(self) -> int:
+    # Android-style: if STA is on 2.4 GHz, AP uses the same channel; else pin channel 6.
+    freq = self._sta_frequency_mhz()
+    if freq is None:
+      return TETHERING_DEFAULT_CHANNEL
+    ch = _freq_mhz_to_channel(freq)
+    return ch if ch is not None else TETHERING_DEFAULT_CHANNEL
+
+  def _sta_frequency_mhz(self) -> int | None:
+    try:
+      _, active_props = self._get_active_wifi_connection()
+      if active_props is None:
+        return None
+      # Prefer non-Hotspot infrastructure association
+      specific = active_props.get('SpecificObject', ('o', '/'))[1]
+      if specific in ("/", ""):
+        return None
+      ap_addr = DBusAddress(specific, bus_name=NM, interface=NM_ACCESS_POINT_IFACE)
+      reply = self._router_main.send_and_get_reply(Properties(ap_addr).get('Frequency'))
+      if reply.header.message_type == MessageType.error:
+        return None
+      return int(reply.body[0][1])
+    except Exception:
+      cloudlog.exception("Failed to read STA frequency")
+      return None
+
+  def _resolve_tethering_iface(self) -> str:
+    # AGNOS creates p2p0 in the kernel, but only some builds let NetworkManager manage it.
+    # Concurrent STA+AP needs an NM-managed p2p0; without one the AP has to take wlan0.
+    if not os.path.exists(f"/sys/class/net/{TETHERING_IFACE_CONCURRENT}"):
+      return TETHERING_IFACE_FALLBACK
+
+    if self._get_device_by_iface(TETHERING_IFACE_CONCURRENT) is None:
+      subprocess.run(["sudo", "nmcli", "device", "set", TETHERING_IFACE_CONCURRENT, "managed", "yes"], check=False)
+      subprocess.run(["sudo", "ip", "link", "set", TETHERING_IFACE_CONCURRENT, "up"], check=False)
+      time.sleep(0.5)
+
+    if self._get_device_by_iface(TETHERING_IFACE_CONCURRENT) is None:
+      cloudlog.warning(f"{TETHERING_IFACE_CONCURRENT} not managed by NetworkManager; Hotspot uses {TETHERING_IFACE_FALLBACK}")
+      return TETHERING_IFACE_FALLBACK
+
+    return TETHERING_IFACE_CONCURRENT
+
+  def _activate_tethering(self):
+    conn_path = self._connections.get(self._tethering_ssid)
+    if conn_path is None:
+      cloudlog.warning("No Hotspot connection to activate")
+      return
+
+    device_path = self._get_device_by_iface(self._tethering_iface) or self._wifi_device or "/"
+    reply = self._router_main.send_and_get_reply(new_method_call(self._nm, 'ActivateConnection', 'ooo',
+                                                                 (conn_path, device_path, "/")))
+    if reply.header.message_type != MessageType.error:
+      return
+
+    cloudlog.warning(f"Failed to activate Hotspot on {self._tethering_iface}: {reply}")
+    if self._tethering_iface == TETHERING_IFACE_FALLBACK or self._wifi_device is None:
+      return
+
+    # Concurrent AP failed; retry on wlan0. This drops STA, but a hotspot the user
+    # asked for is more useful than one that silently never comes up.
+    self._tethering_iface = TETHERING_IFACE_FALLBACK
+    self._ensure_tethering_profile()
+    self._router_main.send_and_get_reply(new_method_call(self._nm, 'ActivateConnection', 'ooo',
+                                                         (conn_path, self._wifi_device, "/")))
+
+  def _share_internet_enabled(self) -> bool:
+    if self._params is not None and self._params.get_bool("TetheringShareInternet"):
+      return True
+    return self._ipv4_forward
 
   def connect_to_network(self, ssid: str, password: str, hidden: bool = False):
     self._set_connecting(ssid)
@@ -743,7 +913,18 @@ class WifiManager:
           return
 
   def is_tethering_active(self) -> bool:
-    # Check ssid, not connected_ssid, to also catch connecting state
+    # Concurrent STA+AP: STA may own wlan0 while Hotspot is active on p2p0.
+    for active_conn in self._get_active_connections():
+      conn_addr = DBusAddress(active_conn, bus_name=NM, interface=NM_ACTIVE_CONNECTION_IFACE)
+      reply = self._router_main.send_and_get_reply(Properties(conn_addr).get_all())
+      if reply.header.message_type == MessageType.error:
+        continue
+      props = reply.body[0]
+      if props.get('Id', ('s', ''))[1] == 'Hotspot':
+        return True
+      conn_path = props.get('Connection', ('o', '/'))[1]
+      if conn_path == self._connections.get(self._tethering_ssid):
+        return True
     return self._wifi_state.ssid == self._tethering_ssid
 
   def is_connection_saved(self, ssid: str) -> bool:
@@ -771,7 +952,7 @@ class WifiManager:
 
       self._tethering_password = password
       if self.is_tethering_active():
-        self.activate_connection(self._tethering_ssid, block=True)
+        self._activate_tethering()
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -801,17 +982,36 @@ class WifiManager:
 
   def set_tethering_active(self, active: bool):
     def worker():
-      if active:
-        self.activate_connection(self._tethering_ssid, block=True)
+      if self._params is not None:
+        self._params.put_bool("TetheringEnabled", active, block=True)
 
-        if not self._ipv4_forward:
+      if active:
+        self._ensure_tethering_profile()
+        self._activate_tethering()
+        if self._share_internet_enabled():
+          cloudlog.warning("net.ipv4.ip_forward = 1 (tethering share)")
+          subprocess.run(["sudo", "sysctl", "net.ipv4.ip_forward=1"], check=False)
+        elif not self._ipv4_forward:
           time.sleep(5)
           cloudlog.warning("net.ipv4.ip_forward = 0")
           subprocess.run(["sudo", "sysctl", "net.ipv4.ip_forward=0"], check=False)
       else:
-        self._deactivate_connection(self._tethering_ssid)
+        self._deactivate_tethering()
 
     threading.Thread(target=worker, daemon=True).start()
+
+  def _deactivate_tethering(self):
+    for active_conn in self._get_active_connections():
+      conn_addr = DBusAddress(active_conn, bus_name=NM, interface=NM_ACTIVE_CONNECTION_IFACE)
+      reply = self._router_main.send_and_get_reply(Properties(conn_addr).get_all())
+      if reply.header.message_type == MessageType.error:
+        continue
+      props = reply.body[0]
+      conn_path = props.get('Connection', ('o', '/'))[1]
+      if props.get('Id', ('s', ''))[1] == 'Hotspot' or conn_path == self._connections.get(self._tethering_ssid):
+        self._router_main.send_and_get_reply(new_method_call(self._nm, 'DeactivateConnection', 'o', (active_conn,)))
+        return
+    self._deactivate_connection(self._tethering_ssid)
 
   def set_current_network_metered(self, metered: MeteredType):
     def worker():
