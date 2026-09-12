@@ -30,7 +30,7 @@ class NetworkLayoutMici(NavScroller):
       self._wifi_manager.set_tethering_active(checked)
 
     self._tethering_toggle_btn = BigToggle("enable tethering", "", toggle_callback=tethering_toggle_callback,
-                                           description="Share the device's internet connection through a Wi-Fi hotspot.")
+                                           description="Keep the hotspot on, including after reboot.")
 
     def tethering_password_callback(password: str):
       if password:
@@ -47,6 +47,15 @@ class NetworkLayoutMici(NavScroller):
     txt_tethering = gui_app.texture("icons_mici/settings/network/tethering.png", 64, 54)
     self._tethering_password_btn = BigButton("tethering password", "", txt_tethering)
     self._tethering_password_btn.set_click_callback(tethering_password_clicked)
+
+    # ******** Hotspot internet sharing ********
+    def tethering_share_callback(share: bool):
+      self._wifi_manager.set_ipv4_forward(share)
+      self._wifi_manager.set_internet_sharing(share)
+
+    self._tethering_share_btn = BigParamControl("share internet with hotspot", "TetheringShareInternet",
+                                                toggle_callback=tethering_share_callback,
+                                                description="Share the device connection with hotspot clients.")
 
     # ******** Network Metered ********
     def network_metered_callback(value: str):
@@ -96,6 +105,7 @@ class NetworkLayoutMici(NavScroller):
       self._network_metered_btn,
       self._tethering_toggle_btn,
       self._tethering_password_btn,
+      self._tethering_share_btn,
       # /* Advanced settings
       self._roaming_btn,
       self._apn_btn,
@@ -106,8 +116,9 @@ class NetworkLayoutMici(NavScroller):
   def _update_state(self):
     super()._update_state()
 
+    # GSM settings need a non-prime SIM; IPv4 forwarding follows the sharing toggle instead
     show_cell_settings = not ui_state.prime_state.is_full_prime()
-    self._wifi_manager.set_ipv4_forward(show_cell_settings)
+    self._wifi_manager.set_ipv4_forward(ui_state.params.get_bool("TetheringShareInternet"))
     self._roaming_btn.set_visible(show_cell_settings)
     self._apn_btn.set_visible(show_cell_settings)
     self._cellular_metered_btn.set_visible(show_cell_settings)
