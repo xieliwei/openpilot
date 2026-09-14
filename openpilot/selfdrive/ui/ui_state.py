@@ -160,7 +160,9 @@ class UIState:
         self.panda_type = panda_states[0].pandaType
         # Check ignition status across all pandas
         if self.panda_type != log.PandaState.PandaType.unknown:
-          self.ignition = any(state.ignitionLine or state.ignitionCan for state in panda_states)
+          ignition_can = any(state.ignitionCan for state in panda_states)
+          ignition_line = any(state.ignitionLine for state in panda_states)
+          self.ignition = ignition_can and ignition_line
     elif not self.sm.alive["pandaStates"]:
       self.panda_type = log.PandaState.PandaType.unknown
 
