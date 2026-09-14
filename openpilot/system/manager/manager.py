@@ -130,7 +130,8 @@ def manager_thread() -> None:
     elif not started and started_prev:
       params.clear_all(ParamKeyFlag.CLEAR_ON_OFFROAD_TRANSITION)
 
-    ignition = any(ps.ignitionLine or ps.ignitionCan for ps in sm['pandaStates'] if ps.pandaType != log.PandaState.PandaType.unknown)
+    valid_pandas = [ps for ps in sm['pandaStates'] if ps.pandaType != log.PandaState.PandaType.unknown]
+    ignition = any(ps.ignitionCan for ps in valid_pandas) and any(ps.ignitionLine for ps in valid_pandas)
     if ignition and not ignition_prev:
       params.clear_all(ParamKeyFlag.CLEAR_ON_IGNITION_ON)
 

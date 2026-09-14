@@ -232,8 +232,6 @@ def hardware_thread(end_event, hw_queue) -> None:
   engaged_prev = False
   pwrsave = False
   offroad_cycle_count = 0
-  ignition_can_seen = False
-
   params = Params()
   power_monitor = PowerMonitoring()
 
@@ -263,19 +261,12 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
 
-      # Once CAN ignition has latched, require both sources. IGN1 linger with
-      # 0x242 gone must go offroad, and Start/Stop that drops IGN1 while 0x242
-      # stays in Park must also go offroad (EPS/camera sleep in that window).
-      # Before the hook fires, fall back to line OR can.
+      # Either source dropping is enough to go offroad. IGN1-only linger
+      # must not start a route (BYD 0x242 in Park is enough for CAN).
       valid_pandas = [ps for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown]
       ignition_can = any(ps.ignitionCan for ps in valid_pandas)
       ignition_line = any(ps.ignitionLine for ps in valid_pandas)
-      if ignition_can:
-        ignition_can_seen = True
-      if ignition_can_seen:
-        onroad_conditions["ignition"] = ignition_can and ignition_line
-      else:
-        onroad_conditions["ignition"] = ignition_line or ignition_can
+      onroad_conditions["ignition"] = ignition_can and ignition_line
 
       pandaState = pandaStates[0]
 
