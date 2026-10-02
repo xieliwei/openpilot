@@ -197,7 +197,8 @@ def hw_state_thread(end_event, hw_queue):
 def hardware_thread(end_event, hw_queue) -> None:
   system_stats = LinuxSystemStats() if sys.platform == "linux" else None
   pm = messaging.PubMaster(['deviceState'])
-  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState"], poll="pandaStates")
+  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState", "carParams"],
+                           poll="pandaStates")
 
   count = 0
 
@@ -261,12 +262,14 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
 
-      # Either source dropping is enough to go offroad. IGN1-only linger
-      # must not start a route (BYD 0x242 in Park is enough for CAN).
+      # Default line OR can. ignitionLineAndCan requires both.
       valid_pandas = [ps for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown]
       ignition_can = any(ps.ignitionCan for ps in valid_pandas)
       ignition_line = any(ps.ignitionLine for ps in valid_pandas)
-      onroad_conditions["ignition"] = ignition_can and ignition_line
+      if sm.valid['carParams'] and sm['carParams'].ignitionLineAndCan:
+        onroad_conditions["ignition"] = ignition_can and ignition_line
+      else:
+        onroad_conditions["ignition"] = ignition_can or ignition_line
 
       pandaState = pandaStates[0]
 
