@@ -457,10 +457,12 @@ class SelfdriveD:
       if self.sm['modelV2'].frameDropPerc > 1 and not big_model_settling:
         self.events.add(EventName.modeldLagging)
 
-    # Decrement personality on distance button press
+    # Distance -: more aggressive. Distance +: more relaxed.
     if self.CP.openpilotLongitudinalControl:
-      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        self.personality = (self.personality - 1) % 3
+      dec = any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents)
+      inc = any(not be.pressed and be.type == ButtonType.altButton2 for be in CS.buttonEvents)
+      if dec != inc:
+        self.personality = (self.personality + (1 if inc else -1)) % 3
         self.params.put('LongitudinalPersonality', self.personality)
         self.events.add(EventName.personalityChanged)
 
