@@ -163,7 +163,10 @@ class UIState:
         if self.panda_type != log.PandaState.PandaType.unknown:
           ignition_can = any(state.ignitionCan for state in panda_states)
           ignition_line = any(state.ignitionLine for state in panda_states)
-          self.ignition = ignition_can and ignition_line
+          if self.CP is not None and self.CP.ignitionLineAndCan:
+            self.ignition = ignition_can and ignition_line
+          else:
+            self.ignition = ignition_can or ignition_line
     elif not self.sm.alive["pandaStates"]:
       self.panda_type = log.PandaState.PandaType.unknown
 
