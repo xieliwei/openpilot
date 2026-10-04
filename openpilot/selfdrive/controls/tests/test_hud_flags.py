@@ -25,7 +25,6 @@ class TestLeadFollowStatus(unittest.TestCase):
     self.assertEqual(lead_follow_status(lead, 1), 0)
 
   def test_within_gap(self):
-    # standard: 1.45s * 20m/s = 29m; at 30m we are outside the gap
     lead = SimpleNamespace(present=True, dRel=30.0, vLead=20.0)
     self.assertEqual(lead_follow_status(lead, 1), 1)
 
@@ -34,12 +33,10 @@ class TestLeadFollowStatus(unittest.TestCase):
     self.assertEqual(lead_follow_status(lead, 1), 2)
 
   def test_too_close(self):
-    # aggressive: 1.25s * 20m/s = 25m; 45% = 11.25m
     lead = SimpleNamespace(present=True, dRel=10.0, vLead=20.0)
     self.assertEqual(lead_follow_status(lead, 0), 3)
 
   def test_standstill_lead(self):
-    # vLead 0 gives no gap; a present lead at standstill stays green
     lead = SimpleNamespace(present=True, dRel=2.0, vLead=0.0)
     self.assertEqual(lead_follow_status(lead, 1), 1)
 

@@ -28,7 +28,7 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
-# Follow distance target in seconds per gap bar, shared with the lead shading thresholds below.
+# Follow distance target in seconds per gap bar
 GAP_TARGETS = {0: 1.25, 1: 1.45, 2: 1.75}
 
 
