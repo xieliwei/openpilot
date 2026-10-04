@@ -28,6 +28,9 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
+# Follow distance target in seconds per gap bar, shared with the lead shading thresholds below.
+GAP_TARGETS = {0: 1.25, 1: 1.45, 2: 1.75}
+
 
 def lane_flags_from_probs(probs, from_model: bool):
   # Brand-opt-in lane HUD: model probs for visibility.
@@ -37,6 +40,19 @@ def lane_flags_from_probs(probs, from_model: bool):
     left_visible = bool(len(probs) > 1 and probs[1] > 0.5)
     right_visible = bool(len(probs) > 2 and probs[2] > 0.5)
   return left_visible, right_visible
+
+
+def lead_follow_status(lead, personality: int) -> int:
+  # 1 within the gap, 2 closer than the gap, 3 within 45% of the gap
+  if not lead.present:
+    return 0
+  target = GAP_TARGETS.get(personality, 1.45)
+  gap_s = target * lead.vLead if lead.vLead > 0.0 else 0.0
+  if gap_s > 0.0 and lead.dRel <= gap_s * 0.45:
+    return 3
+  if gap_s > 0.0 and lead.dRel < gap_s:
+    return 2
+  return 1
 
 
 class Controls:
@@ -50,7 +66,7 @@ class Controls:
 
     self.sm = messaging.SubMaster(['lateralDelay', 'vehicleParameters', 'lateralTorqueParameters', 'modelV2', 'selfdriveState',
                                    'extrinsicsCalibration', 'deviceMotion', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'radarState'], poll='selfdriveState')
     self.pm = messaging.PubMaster(['carControl', 'controlsState'])
 
     self.steer_limited_by_safety = False
@@ -178,6 +194,8 @@ class Controls:
     hudControl.lanesVisible = CC.enabled
     hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
+    if self.CP.hudLeadShading and self.sm.valid['radarState']:
+      hudControl.leadFollowStatus = lead_follow_status(self.sm['radarState'].leadOne, self.sm['selfdriveState'].personality.raw)
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
     hudControl.rightLaneVisible = True
