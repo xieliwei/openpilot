@@ -119,6 +119,8 @@ class CarEvents:
       events.add(EventName.espActive)
     if CS.stockFcw:
       events.add(EventName.stockFcw)
+    if CS.adasFcwDebug:  # debug: BYD 0x38a warn nibble, unvalidated
+      events.add(EventName.bydAdasWarnDebug)
     if CS.stockAeb:
       events.add(EventName.stockAeb)
     if CS.stockLkas:

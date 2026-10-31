@@ -500,6 +500,14 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.warningSoft, 2.),
   },
 
+  EventName.bydAdasWarnDebug: {
+    ET.PERMANENT: Alert(
+      "BRAKE!",
+      "ADAS WARN DEBUG (0x38a)",
+      AlertStatus.critical, AlertSize.full,
+      Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.warningSoft, 2.),
+  },
+
   EventName.ldw: {
     ET.PERMANENT: Alert(
       "Lane Departure Detected",
