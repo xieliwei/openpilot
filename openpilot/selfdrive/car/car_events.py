@@ -119,6 +119,8 @@ class CarEvents:
       events.add(EventName.espActive)
     if CS.stockFcw:
       events.add(EventName.stockFcw)
+    if CS.pcwStageDebug not in (0, 2):
+      events.add(EventName.bydPcwStageDebug)
     if CS.stockAeb:
       events.add(EventName.stockAeb)
     if CS.stockLkas:
